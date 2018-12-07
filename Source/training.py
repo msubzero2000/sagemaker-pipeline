@@ -50,144 +50,11 @@ def upload_to_s3(channel, file):
 
 # TODO: Load data and split in to train/test split
 
-# Download the training zip file
-input_s3_path="s3://sagemaker-objdetect/rego-plate-detection/AustralianNumberPlate.zip"
-bucket = 'sagemaker-objdetect' # custom bucket name.
-prefix = 'rego-plate-detection'
-
-# Download and unzip the file into temp folder
-tmp_dir="tmp_objectdetection_cs"
-local_input_file = "{}/data.zip".format(tmp_dir)
-local_data_dir = "./{}".format(tmp_dir)
-!mkdir -p $tmp_dir
-
-!aws s3 cp $input_s3_path $local_input_file
-!echo $local_data_dir
-!unzip  -o  $local_input_file -d $local_data_dir
-
-input_raw_data_dir="{}/Selected".format(local_data_dir)
-input_processed_data_dir="{}/data".format(tmp_dir)
-!mkdir -p $input_processed_data_dir
-
-import xml.etree.ElementTree as ET
-from pathlib import Path
-import os
-import json
-
-def transform(input_xml, images_dir, class_index, output_dir):
-    formatted_annotation = {}
-    tree = ET.parse(input_xml)
-    root = tree.getroot()
-    
-    # Image file
-    formatted_annotation['file']  =  root.find("path").text.split("\\")[-1]
-    
-    #Image size
-    img_size_w =root.find("size/width").text
-    img_size_h =root.find("size/height").text
-    img_size_d =root.find("size/depth").text
-    formatted_annotation['image_size']= [{"width": img_size_w, "height": img_size_h, "depth": img_size_d }]
-    
-    #Image annotations
-    formatted_annotation['annotations'] = []
-    formatted_annotation['categories'] = []
-    categories = {}
-    for e in  root.findall("object"):
-        annotation = {}
-        class_name = e.find('name').text
-        annotation['class_id'] = class_index[class_name]
-        annotation['left'] = int(e.find('bndbox/xmin').text)
-        annotation['width'] = int(e.find('bndbox/xmax').text) - int(e.find('bndbox/xmin').text) 
-        annotation['top'] = int(e.find('bndbox/ymin').text) 
-        annotation['height'] = int(e.find('bndbox/ymax').text) - int(e.find('bndbox/ymin').text) 
-
-        # Add annotation
-        formatted_annotation['annotations'].append(annotation)
-        
-        # Add categories list , only unique
-        if not class_name in categories:
-            formatted_annotation['categories'].append({ 'class_id':  class_index[class_name], 'name': class_name})
-    
-    # Write the output file using the same name as the image file, but with .json extension
-    file_name =  "{}.json".format(formatted_annotation['file'].split(".")[-2:-1][0])
-    with open(os.path.join(output_dir, file_name) ,"w") as f   :
-        f.write(json.dumps(formatted_annotation))
-    print(formatted_annotation)
-    
-    ## Move the image file to the same directory
-    os.rename(os.path.join(input_raw_data_dir, formatted_annotation['file']), os.path.join(output_dir, formatted_annotation['file']))
-
-labels_index={'NumberPlate':0}
-
-# Transform the data into the expected format
-import os
-files_list = os.listdir(input_raw_data_dir)
-for f in files_list:
-    # xmlinputfile has no extension
-    if not "." in f:
-        transform(os.path.join(input_raw_data_dir, f), input_raw_data_dir,labels_index , input_processed_data_dir)
-   
-      
-# Split into train and validation
-
-train_dir="{}/train".format(tmp_dir)
-train_annot_dir="{}/train_annotation".format(tmp_dir)
-validation_dir="{}/validation".format(tmp_dir)
-validation_annot_dir="{}/validation_annotation".format(tmp_dir)
-
-
-#Create folders to store the data and annotation files
-!mkdir -p $train_dir $train_annot_dir $validation_dir $validation_annot_dir
-
-
-
-import os
-import json
-import glob
-jsons = glob.glob('{}/*.json'.format(input_processed_data_dir))
-
-train_size= int(len(jsons)*.8)
-
-
-import shutil
-from sklearn.model_selection import train_test_split, learning_curve
-train_jsons, val_jsons = train_test_split(jsons, test_size = 0.2, random_state = 777, shuffle=True)
-
-
-
-#Moving training files to the training folders
-for f in train_jsons:
-    image_file =  f.split('.')[0] + '.jpg'
-    shutil.move(image_file, train_dir)
-    shutil.move(f, train_annot_dir)
-
-#Moving validation files to the validation folders
-for f in val_jsons:
-    image_file =  f.split('.')[0]+'.jpg'
-    shutil.move(image_file, validation_dir)
-    shutil.move(f, validation_annot_dir)
-
-    
-train_channel = prefix + '/train'
-validation_channel = prefix + '/validation'
-train_annotation_channel = prefix + '/train_annotation'
-validation_annotation_channel = prefix + '/validation_annotation'
-
-sess.upload_data(path=train_dir, bucket=bucket, key_prefix=train_channel)
-sess.upload_data(path=validation_dir, bucket=bucket, key_prefix=validation_channel)
-sess.upload_data(path=train_annot_dir, bucket=bucket, key_prefix=train_annotation_channel)
-sess.upload_data(path=validation_annot_dir, bucket=bucket, key_prefix=validation_annotation_channel)
-
-s3_train_data = 's3://{}/{}'.format(bucket, train_channel)
-s3_validation_data = 's3://{}/{}'.format(bucket, validation_channel)
-s3_train_annotation = 's3://{}/{}'.format(bucket, train_annotation_channel)
-s3_validation_annotation = 's3://{}/{}'.format(bucket, validation_annotation_channel)
-
-s3_output_location = 's3://{}/{}/output'.format(bucket, prefix)
-
 from sagemaker.amazon.amazon_estimator import get_image_uri
 
 print ("Setting Algorithm Settings")
+
+train_size = 336
 
 # Specify the base network
 base_network = 'resnet-50'
@@ -222,7 +89,7 @@ training_params = \
     },
     "ResourceConfig": {
         "InstanceCount": 1,
-        "InstanceType": "ml.p2.8xlarge",
+        "InstanceType": "ml.p2.16xlarge",
         "VolumeSizeInGB": 50
     },
     "TrainingJobName": job_name,
